@@ -65,13 +65,28 @@ def load_data_pro():
         df_so_raw = fix_common(df_so_raw)
         df_stat_lok = fix_common(df_stat_lok)
 
+        # Konversi Koordinat
         df_master['X'] = pd.to_numeric(df_master['X'], errors='coerce')
         df_master['Y'] = pd.to_numeric(df_master['Y'], errors='coerce')
         df_master = df_master.dropna(subset=['X', 'Y'])
         df_master['Y_Visual'] = 1000 - df_master['Y']
         
-        df_items['Weight'] = df_items['Kategori'].astype(str).apply(lambda x: 1 if 'FAST' in x.upper() else (-1 if 'SLOW' in x.upper() else 0))
-        rak_resume = df_items.groupby('Lokasi').agg(Total_Barang=('Nama_Barang', 'count'), Speed_Score=('Weight', 'mean')).reset_index()
+        # --- PERBAIKAN ERROR FLOAT OBJECT ---
+        # Pastikan kolom Kategori bersih dari NaN dan bertipe string
+        df_items['Kategori'] = df_items['Kategori'].fillna('NORMAL').astype(str)
+        
+        def calculate_weight(x):
+            val = x.upper()
+            if 'FAST' in val: return 1
+            if 'SLOW' in val: return -1
+            return 0
+
+        df_items['Weight'] = df_items['Kategori'].apply(calculate_weight)
+        
+        rak_resume = df_items.groupby('Lokasi').agg(
+            Total_Barang=('Nama_Barang', 'count'), 
+            Speed_Score=('Weight', 'mean')
+        ).reset_index()
 
         df_full = pd.merge(df_master, rak_resume, on='Lokasi', how='left')
         df_items_full = pd.merge(df_items, df_master[['Lokasi', 'Lantai']], on='Lokasi', how='inner')
@@ -87,18 +102,24 @@ df_full, df_peta, df_stat_lok, df_items, df_so_raw, df_items_full = load_data_pr
 if df_full is not None:
     st.sidebar.header("⚙️ Filter & Navigasi")
     
-    list_lantai = sorted(df_full['Lantai'].unique().tolist())
+    list_lantai = sorted(df_full['Lantai'].astype(str).unique().tolist())
     sel_lantai = st.sidebar.selectbox("Pilih Lantai", options=list_lantai)
     
-    list_nama_lok = sorted(df_full[df_full['Lantai'] == sel_lantai]['nama_lokasi'].dropna().unique().tolist())
+    list_nama_lok = sorted(df_full[df_full['Lantai'].astype(str) == sel_lantai]['nama_lokasi'].dropna().unique().tolist())
     sel_nama_lok = st.sidebar.multiselect("Filter Nama Lokasi", options=list_nama_lok)
     
     list_status = sorted(df_stat_lok['STATUS'].dropna().unique().tolist()) if 'STATUS' in df_stat_lok.columns else []
     sel_status = st.sidebar.multiselect("Filter Status SO", options=list_status)
 
-    list_suggest = sorted(df_items_full['Nama_Barang'].unique().tolist() + df_full['Lokasi'].unique().tolist())
-    search_q = st.selectbox("🔍 Cari Barang / Rak", options=[""] + list_suggest, 
-                            format_func=lambda x: "Ketik nama barang atau kode rak..." if x == "" else x).upper()
+    # Suggestion list yang aman
+    list_suggest = sorted(
+        df_items_full['Nama_Barang'].astype(str).unique().tolist() + 
+        df_full['Lokasi'].astype(str).unique().tolist()
+    )
+    
+    search_input = st.selectbox("🔍 Cari Barang / Rak", options=[""] + list_suggest, 
+                               format_func=lambda x: "Ketik nama barang atau kode rak..." if x == "" else x)
+    search_q = str(search_input).upper()
 
     menu = st.radio("Mode:", ["📦 STOK OPNAME", "🔥 HEATMAP"], horizontal=True)
 
@@ -106,7 +127,7 @@ if df_full is not None:
     viz_df_base = pd.merge(df_full, df_stat_lok[['Lokasi', 'STATUS']], on='Lokasi', how='left')
     viz_df_base['STATUS'] = viz_df_base['STATUS'].fillna('BELUM')
     
-    mask = (viz_df_base['Lantai'] == sel_lantai)
+    mask = (viz_df_base['Lantai'].astype(str) == sel_lantai)
     if sel_nama_lok: mask &= viz_df_base['nama_lokasi'].isin(sel_nama_lok)
     if sel_status: mask &= viz_df_base['STATUS'].isin(sel_status)
     filtered_viz = viz_df_base[mask].copy()
@@ -121,12 +142,12 @@ if df_full is not None:
     st.sidebar.markdown("---")
     st.sidebar.subheader("📊 Pencapaian SO")
     fig_achieve = go.Figure(data=[go.Pie(labels=['Done', 'Sisa'], 
-                                        values=[done_rak, total_rak - done_rak], 
+                                        values=[done_rak, max(0, total_rak - done_rak)], 
                                         hole=.7, 
                                         marker_colors=['#28a745', '#eeeeee'],
                                         showlegend=False)])
     fig_achieve.update_layout(margin=dict(l=0, r=0, t=0, b=0), height=180, 
-                             annotations=[dict(text=f'{persentase:.1f}%', x=0.5, y=0.5, font_size=20, showarrow=False)])
+                               annotations=[dict(text=f'{persentase:.1f}%', x=0.5, y=0.5, font_size=20, showarrow=False)])
     st.sidebar.plotly_chart(fig_achieve, use_container_width=True, config={'displayModeBar': False})
 
     # Metric Cards Utama
@@ -137,8 +158,11 @@ if df_full is not None:
 
     h_locations = []
     if search_q != "":
-        match = df_items_full[(df_items_full['Nama_Barang'].str.contains(search_q, na=False, case=False)) | 
-                             (df_items_full['Lokasi'].str.contains(search_q, na=False, case=False))]
+        # Pencarian yang aman terhadap tipe data non-string
+        match = df_items_full[
+            (df_items_full['Nama_Barang'].astype(str).str.contains(search_q, na=False, case=False)) | 
+            (df_items_full['Lokasi'].astype(str).str.contains(search_q, na=False, case=False))
+        ]
         h_locations = match['Lokasi'].unique().tolist()
 
     # --- 5. VISUALIZATION ---
@@ -147,25 +171,37 @@ if df_full is not None:
         colors = {'DONE': '#28a745', 'ON PROGRESS': '#ffc107', 'PENDING': '#dc3545', 'BELUM': '#6c757d'}
         for status, color in colors.items():
             sub = filtered_viz[filtered_viz['STATUS'] == status]
-            fig.add_trace(go.Scatter(x=sub['X'], y=sub['Y_Visual'], mode='markers+text', name=status, text=sub['Lokasi'] if not h_locations else "",
-                marker=dict(size=12, color=color, line=dict(width=1, color='white')), customdata=sub['Lokasi'], hovertemplate="<b>Rak: %{customdata}</b><extra></extra>"))
+            if not sub.empty:
+                fig.add_trace(go.Scatter(x=sub['X'], y=sub['Y_Visual'], mode='markers+text', name=status, 
+                    text=sub['Lokasi'] if not h_locations else "",
+                    marker=dict(size=12, color=color, line=dict(width=1, color='white')), 
+                    customdata=sub['Lokasi'], hovertemplate="<b>Rak: %{customdata}</b><extra></extra>"))
     else:
         fig.add_trace(go.Scatter(x=filtered_viz['X'], y=filtered_viz['Y_Visual'], mode='markers+text', text=filtered_viz['Lokasi'],
-            marker=dict(size=filtered_viz['Total_Barang'].fillna(0)*5, sizemode='area', color=filtered_viz['Speed_Score'].fillna(0), colorscale='RdBu_r'),
+            marker=dict(size=filtered_viz['Total_Barang'].fillna(0)*5, sizemode='area', 
+                        color=filtered_viz['Speed_Score'].fillna(0), colorscale='RdBu_r'),
             customdata=filtered_viz['Lokasi'], hovertemplate="<b>Rak: %{customdata}</b><extra></extra>"))
 
     if h_locations:
-        h_df = viz_df_base[viz_df_base['Lokasi'].isin(h_locations) & (viz_df_base['Lantai'] == sel_lantai)]
-        fig.add_trace(go.Scatter(x=h_df['X'], y=h_df['Y_Visual'], mode='markers', marker=dict(size=35, color="rgba(255, 0, 0, 0.2)", line=dict(width=4, color="#FF0000")), name="Target", hoverinfo='skip'))
+        h_df = viz_df_base[viz_df_base['Lokasi'].isin(h_locations) & (viz_df_base['Lantai'].astype(str) == sel_lantai)]
+        fig.add_trace(go.Scatter(x=h_df['X'], y=h_df['Y_Visual'], mode='markers', 
+                                 marker=dict(size=35, color="rgba(255, 0, 0, 0.2)", line=dict(width=4, color="#FF0000")), 
+                                 name="Target", hoverinfo='skip'))
 
     # Background Peta
-    map_row = df_peta[df_peta['Lantai'] == sel_lantai]
+    map_row = df_peta[df_peta['Lantai'].astype(str) == sel_lantai]
     bg_url = ""
     if not map_row.empty and 'URL_PETA' in map_row.columns:
-        bg_url = f"https://lh3.googleusercontent.com/d/{map_row['URL_PETA'].values[0]}"
+        # Konstruksi URL gambar (Pastikan URL di Sheet benar)
+        raw_url = str(map_row['URL_PETA'].values[0])
+        bg_url = raw_url if "http" in raw_url else f"https://lh3.googleusercontent.com/d/{raw_url}"
     
-    fig.update_layout(images=[dict(source=bg_url, xref="x", yref="y", x=0, y=1000, sizex=1000, sizey=1000, sizing="stretch", opacity=0.6, layer="below")],
-        xaxis=dict(range=[0, 1000], visible=False), yaxis=dict(range=[0, 1000], visible=False), height=600, margin=dict(l=0, r=0, t=0, b=0), showlegend=False)
+    fig.update_layout(
+        images=[dict(source=bg_url, xref="x", yref="y", x=0, y=1000, sizex=1000, sizey=1000, sizing="stretch", opacity=0.6, layer="below")],
+        xaxis=dict(range=[0, 1000], visible=False), 
+        yaxis=dict(range=[0, 1000], visible=False), 
+        height=600, margin=dict(l=0, r=0, t=0, b=0), showlegend=False
+    )
 
     # --- 6. RENDER MAP & LEGEND ---
     st.markdown('<div class="map-container">', unsafe_allow_html=True)
@@ -213,9 +249,16 @@ if df_full is not None:
                 
                 so_filtered.rename(columns={q_teori:'QTYTEORI', j_hitung:'JENIS_PENGHITUNG', q_fisik:'QTYFISIK', q_selisih:'QTYSELISIH'}, inplace=True)
                 
-                pivot_so = so_filtered.pivot_table(index=['Nama_Barang', 'QTYTEORI'], columns='JENIS_PENGHITUNG', values=['QTYFISIK', 'QTYSELISIH'], aggfunc='sum').reset_index()
-                pivot_so.columns = [f"{col[0]}_{col[1]}".strip('_') for col in pivot_so.columns.values]
-                st.dataframe(pivot_so, use_container_width=True, hide_index=True)
+                # Pivot table SO
+                try:
+                    pivot_so = so_filtered.pivot_table(index=['Nama_Barang', 'QTYTEORI'], 
+                                                     columns='JENIS_PENGHITUNG', 
+                                                     values=['QTYFISIK', 'QTYSELISIH'], 
+                                                     aggfunc='sum').reset_index()
+                    pivot_so.columns = [f"{col[0]}_{col[1]}".strip('_') for col in pivot_so.columns.values]
+                    st.dataframe(pivot_so, use_container_width=True, hide_index=True)
+                except:
+                    st.dataframe(so_filtered, use_container_width=True, hide_index=True)
             else:
                 st.warning("Belum ada data scan.")
     else:
